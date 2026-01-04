@@ -196,25 +196,16 @@ class QdrantQueryHandler:
         house: Literal["Commons", "Lords"] | None = None,
         max_results: int = 100,
         min_score: float = 0,
-    ) -> list[dict]:
+        # New filtering options
+        exclude_member_ids: list[int] | None = None,
+        parties: list[str] | None = None,
+        # Diversification
+        group_by: str | None = None,
+        group_size: int = 1,
+    ) -> list[dict] | list[list[dict]]:
         """
         Search Hansard contributions using Qdrant vector search.
-
-        Args:
-            query: Text to search for in contributions (optional)
-            member_id: Member ID (optional)
-            date_from: Start date in format 'YYYY-MM-DD' (optional)
-            date_to: End date in format 'YYYY-MM-DD' (optional)
-            debate_id: Debate ID (optional)
-            house: House (Commons|Lords) (optional)
-            max_results: Maximum number of results to return (default 100)
-            min_score: Minimum relevance score (default 0)
-
-        Returns:
-            List of Hansard contribution details dictionaries
-
-        Raises:
-            ValueError: If no search parameters are provided
+        If group_by is provided (e.g. 'DebateSectionExtId'), results are diversified.
         """
 
         # Build filters
@@ -224,15 +215,50 @@ class QdrantQueryHandler:
             build_match_filter("House", house),
             build_date_range_filter(date_from, date_to),
         ]
+        
+        must_not = []
+        if exclude_member_ids:
+            must_not.append(models.FieldCondition(key="MemberId", match=models.MatchAny(any=exclude_member_ids)))
 
-        query_filter = build_filters(filter_conditions)
+        query_filter = models.Filter(must=[c for c in filter_conditions if c], must_not=must_not)
 
         if query:
             # Generate embedding for search query
             dense_query_vector = await self.embed_query_dense(query)
             sparse_query_vector = self.embed_query_sparse(query)
 
-            # Perform vector search
+            if group_by:
+                # Diversified Search via Groups
+                query_response = await self.qdrant_client.query_points_groups(
+                    collection_name=self.settings.HANSARD_CONTRIBUTIONS_COLLECTION,
+                    prefetch=[
+                        models.Prefetch(query=dense_query_vector, using="text_dense", filter=query_filter),
+                        models.Prefetch(query=sparse_query_vector, using="text_sparse", filter=query_filter),
+                    ],
+                    query=models.FusionQuery(fusion=models.Fusion.RRF),
+                    group_by=group_by,
+                    group_size=group_size,
+                    limit=max_results,
+                    with_payload=True
+                )
+                
+                results = []
+                for group in query_response.groups:
+                    group_hits = []
+                    for hit in group.hits:
+                        payload = hit.payload
+                        group_hits.append({
+                            "id": hit.id,
+                            "text": payload.get("text", ""),
+                            "date": payload.get("SittingDate"),
+                            "member_name": payload.get("MemberName"),
+                            "debate_title": payload.get("DebateSection", ""),
+                            "score": hit.score
+                        })
+                    results.append(group_hits)
+                return results
+
+            # Standard Search
             query_response = await self.qdrant_client.query_points(
                 collection_name=self.settings.HANSARD_CONTRIBUTIONS_COLLECTION,
                 prefetch=[
@@ -257,10 +283,10 @@ class QdrantQueryHandler:
                 with_payload=True,
             )
 
-            query_response = query_response.points
+            query_points = query_response.points
         else:
             # If no query, use scroll to get results with filters only
-            query_response, _ = await self.qdrant_client.scroll(
+            query_points, _ = await self.qdrant_client.scroll(
                 collection_name=self.settings.HANSARD_CONTRIBUTIONS_COLLECTION,
                 scroll_filter=query_filter,
                 limit=max_results,
@@ -273,10 +299,11 @@ class QdrantQueryHandler:
             )
 
         results = []
-        for result in query_response:
+        for result in query_points:
             payload = result.payload
             results.append(
                 {
+                    "id": result.id,
                     "text": payload.get("text", ""),
                     "date": payload.get("SittingDate"),
                     "house": payload.get("House"),
@@ -303,6 +330,84 @@ class QdrantQueryHandler:
             )
 
         return results
+
+    async def recommend_contributions(
+        self,
+        positive_ids: list[str],
+        negative_ids: list[str] | None = None,
+        max_results: int = 10,
+        filter_conditions: list | None = None,
+    ) -> list[dict]:
+        """Find contributions similar to positive_ids and dissimilar to negative_ids."""
+        query_filter = build_filters(filter_conditions) if filter_conditions else None
+        
+        response = await self.qdrant_client.query_points(
+            collection_name=self.settings.HANSARD_CONTRIBUTIONS_COLLECTION,
+            query=models.RecommendQuery(
+                recommend=models.RecommendInput(
+                    positive=positive_ids,
+                    negative=negative_ids or [],
+                )
+            ),
+            using="text_dense",
+            query_filter=query_filter,
+            limit=max_results,
+            with_payload=True
+        )
+        
+        return [
+            {
+                "id": hit.id,
+                "text": hit.payload.get("text", ""),
+                "member_name": hit.payload.get("MemberName"),
+                "date": hit.payload.get("SittingDate"),
+                "score": hit.score
+            }
+            for hit in response.points
+        ]
+
+    async def discover_contributions(
+        self,
+        target_id: str,
+        context_pairs: list[tuple[str, str]],
+        max_results: int = 10,
+        filter_conditions: list | None = None,
+    ) -> list[dict]:
+        """
+        Use Discovery API to find points based on target and context pairs.
+        context_pairs: list of (positive_id, negative_id)
+        """
+        query_filter = build_filters(filter_conditions) if filter_conditions else None
+        
+        context = [
+            models.ContextPair(positive=p, negative=n)
+            for p, n in context_pairs
+        ]
+        
+        response = await self.qdrant_client.query_points(
+            collection_name=self.settings.HANSARD_CONTRIBUTIONS_COLLECTION,
+            query=models.DiscoverQuery(
+                discover=models.DiscoverInput(
+                    target=target_id,
+                    context=context
+                )
+            ),
+            using="text_dense",
+            query_filter=query_filter,
+            limit=max_results,
+            with_payload=True
+        )
+        
+        return [
+            {
+                "id": hit.id,
+                "text": hit.payload.get("text", ""),
+                "member_name": hit.payload.get("MemberName"),
+                "date": hit.payload.get("SittingDate"),
+                "score": hit.score
+            }
+            for hit in response.points
+        ]
 
     async def find_relevant_contributors(
         self,
