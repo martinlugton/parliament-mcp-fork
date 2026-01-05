@@ -49,7 +49,21 @@ To perform a full historical load (e.g., from the start of the 2024 Parliament):
 python batch_load_data.py --start-date 2024-07-04 --type all
 ```
 
-### 4. Daily Synchronization
+### 4. Robust Data Loading & Verification
+To ensure a **100% complete** and reproducible data set, follow this three-step process:
+
+1. **Initial Batch Load**: Run the batch loader for the full range (as shown above).
+2. **Audit for Gaps**: Identify any days that failed to load or were skipped.
+   ```bash
+   docker compose exec mcp-server uv run python audit_data.py
+   ```
+   *Note: This script cross-references with the official Parliament API to ignore weekends and non-sitting days.*
+3. **Heal Missing Data**: Automatically retry and fill any validated gaps found during the audit.
+   ```bash
+   docker compose exec mcp-server uv run python heal_data.py
+   ```
+
+### 5. Daily Synchronization
 To keep your local database up-to-date with the latest parliamentary activity:
 ```bash
 # Automatically detects gaps and pulls missing data

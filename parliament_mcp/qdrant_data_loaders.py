@@ -269,32 +269,43 @@ class QdrantHansardLoader(QdrantDataLoader):
 
         async def process_page(query_params: dict):
             """Fetch and process a single page"""
-            try:
-                async with semaphore:
-                    response = await cached_limited_get(url, params=query_params)
-                    response.raise_for_status()
-                    page_data = response.json()
+            retries = 3
+            for attempt in range(retries):
+                try:
+                    async with semaphore:
+                        response = await cached_limited_get(url, params=query_params)
+                        response.raise_for_status()
+                        page_data = response.json()
 
-                    contributions = ContributionsResponse.model_validate(page_data)
-                    valid_contributions = [c for c in contributions.Results if len(c.ContributionTextFull) > 0]
+                        contributions = ContributionsResponse.model_validate(page_data)
+                        valid_contributions = [c for c in contributions.Results if len(c.ContributionTextFull) > 0]
 
-                    for contribution in valid_contributions:
-                        contribution.debate_parents = await self.get_debate_parents(
-                            contribution.SittingDate.strftime("%Y-%m-%d"),
-                            contribution.House,
-                            contribution.DebateSectionExtId,
-                        )
+                        for contribution in valid_contributions:
+                            contribution.debate_parents = await self.get_debate_parents(
+                                contribution.SittingDate.strftime("%Y-%m-%d"),
+                                contribution.House,
+                                contribution.DebateSectionExtId,
+                            )
 
-                    await self.store_in_qdrant_batch(valid_contributions)
-                    self.progress.update(task, advance=len(contributions.Results))
-            except Exception:
-                logger.exception("Failed to process page - %s", query_params)
-                raise
+                        await self.store_in_qdrant_batch(valid_contributions)
+                        self.progress.update(task, advance=len(contributions.Results))
+                        return # Success
+                except Exception as e:
+                    if attempt < retries - 1:
+                        logger.warning("Retry %d/%d for page %s due to %s", attempt + 1, retries, query_params, e)
+                        await asyncio.sleep(2**attempt)
+                    else:
+                        logger.exception("Failed to process page after %d attempts - %s", retries, query_params)
+                        # We don't raise here to avoid crashing the whole TaskGroup, 
+                        # but we should probably mark it as failed in progress bar if possible
+                        self.progress.update(task, description=f"[red]Error loading some contributions[/red]")
 
-        # TaskGroup with one task per page
-        async with asyncio.TaskGroup() as tg:
-            for skip in range(0, total_results, self.page_size):
-                tg.create_task(process_page(base_params | {"take": self.page_size, "skip": skip}))
+        # Run all pages
+        tasks = []
+        for skip in range(0, total_results, self.page_size):
+            tasks.append(process_page(base_params | {"take": self.page_size, "skip": skip}))
+        
+        await asyncio.gather(*tasks)
 
     async def get_debate_parents(
         self, date: str, house: Literal["Commons", "Lords"], debate_ext_id: str
@@ -374,40 +385,49 @@ class QdrantParliamentaryQuestionLoader(QdrantDataLoader):
 
         async def process_page(query_params: dict):
             """Fetch and process a single page"""
-            try:
-                async with semaphore:
-                    response = await cached_limited_get(url, params=query_params)
-                    response.raise_for_status()
-                    page_data = response.json()
+            retries = 3
+            for attempt in range(retries):
+                try:
+                    async with semaphore:
+                        response = await cached_limited_get(url, params=query_params)
+                        response.raise_for_status()
+                        page_data = response.json()
 
-                    questions_response = ParliamentaryQuestionsResponse.model_validate(page_data)
+                        questions_response = ParliamentaryQuestionsResponse.model_validate(page_data)
 
-                    # Filter out duplicates
-                    new_questions = []
-                    for question in questions_response.questions:
-                        question_id = f"pq_{question.id}"
-                        if question_id not in seen_ids:
-                            seen_ids.add(question_id)
+                        # Filter out duplicates
+                        new_questions = []
+                        for question in questions_response.questions:
+                            question_id = f"pq_{question.id}"
+                            if question_id not in seen_ids:
+                                seen_ids.add(question_id)
 
-                            # Enrich truncated questions
-                            if await self._needs_enrichment(question):
-                                enriched_question = await self.enrich_question(question)
-                                new_questions.append(enriched_question)
-                            else:
-                                new_questions.append(question)
+                                # Enrich truncated questions
+                                if await self._needs_enrichment(question):
+                                    enriched_question = await self.enrich_question(question)
+                                    new_questions.append(enriched_question)
+                                else:
+                                    new_questions.append(question)
 
-                    if new_questions:
-                        await self.store_in_qdrant_batch(new_questions)
+                        if new_questions:
+                            await self.store_in_qdrant_batch(new_questions)
 
-                    self.progress.update(task_id, advance=len(questions_response.questions))
-            except Exception:
-                logger.exception("Failed to process PQ page - %s", query_params)
-                raise
+                        self.progress.update(task_id, advance=len(questions_response.questions))
+                        return # Success
+                except Exception as e:
+                    if attempt < retries - 1:
+                        logger.warning("Retry %d/%d for PQ page %s due to %s", attempt + 1, retries, query_params, e)
+                        await asyncio.sleep(2**attempt)
+                    else:
+                        logger.exception("Failed to process PQ page after %d attempts - %s", retries, query_params)
+                        self.progress.update(task_id, description=f"[red]Error loading some PQs[/red]")
 
-        # TaskGroup with one task per page
-        async with asyncio.TaskGroup() as tg:
-            for skip in range(0, total_results, self.page_size):
-                tg.create_task(process_page(base_params | {"take": self.page_size, "skip": skip}))
+        # Run all pages
+        tasks = []
+        for skip in range(0, total_results, self.page_size):
+            tasks.append(process_page(base_params | {"take": self.page_size, "skip": skip}))
+        
+        await asyncio.gather(*tasks)
 
     async def _needs_enrichment(self, question: ParliamentaryQuestion) -> bool:
         """Check if question needs content enrichment."""
