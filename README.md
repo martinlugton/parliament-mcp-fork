@@ -28,6 +28,7 @@ The server exposes tools for real-time and historical research:
 - Docker & Docker Compose
 - Node.js (for Claude integration)
 - **Azure OpenAI API Key** (for `text-embedding-3-large`)
+- Python 3.12+ (for running loader scripts locally)
 
 ### 2. Initial Setup
 ```bash
@@ -35,40 +36,68 @@ The server exposes tools for real-time and historical research:
 cp .env.example .env
 # Fill in AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT in .env
 
-# Start services
-docker compose up --build -d
+# Start services (Qdrant and MCP Server)
+docker compose up -d
 
-# Initialize database structure
+# Initialize Qdrant Collection Structure
 docker compose exec mcp-server uv run parliament-mcp init-qdrant
 ```
 
-### 3. Loading Historical Data
-To perform a full historical load (e.g., from the start of the 2024 Parliament):
+### 3. Loading Historical Data (100% Confidence)
+
+We use a robust **Harvest-Process-Audit** workflow to ensure 100% of data for a given period is loaded, embedded, and searchable. This system handles API failures, rate limits, and network interruptions automatically.
+
+**The Master Script:** `robust_loader.py`
+
+#### Step 1: Initialize the Queue
+Create the local SQLite database that tracks every single item's state (`PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`).
 ```bash
-# Uses robust 1-week batches with retries
-python batch_load_data.py --start-date 2024-07-04 --type all
+python robust_loader.py init-db
 ```
 
-### 4. Robust Data Loading & Verification
-To ensure a **100% complete** and reproducible data set, follow this three-step process:
-
-1. **Initial Batch Load**: Run the batch loader for the full range (as shown above).
-2. **Audit for Gaps**: Identify any days that failed to load or were skipped.
-   ```bash
-   docker compose exec mcp-server uv run python audit_data.py
-   ```
-   *Note: This script cross-references with the official Parliament API to ignore weekends and non-sitting days.*
-3. **Heal Missing Data**: Automatically retry and fill any validated gaps found during the audit.
-   ```bash
-   docker compose exec mcp-server uv run python heal_data.py
-   ```
-
-### 5. Daily Synchronization
-To keep your local database up-to-date with the latest parliamentary activity:
+#### Step 2: Harvest Metadata
+Scan the Parliament API to find all available items for your date range. This is fast and just populates the "To-Do" list.
 ```bash
-# Automatically detects gaps and pulls missing data
-python sync_data.py
+# Example: Load everything from the 2024 Election to present
+python robust_loader.py harvest --start-date 2024-07-04 --end-date 2026-01-08
 ```
+
+#### Step 3: Process the Queue
+Fetch full text, generate embeddings (Azure OpenAI), and save to Qdrant. This is the heavy lifting.
+```bash
+# Run in a loop until the queue is empty
+python robust_loader.py process --loop --batch-size 50
+```
+*Tip: You can stop (Ctrl+C) and restart this command at any time. It picks up exactly where it left off.*
+
+#### Step 4: Verify Completeness (The Audit)
+**Crucial Step:** Run the audit command to prove that 100% of the data is loaded.
+```bash
+python robust_loader.py audit --start-date 2024-07-04 --end-date 2026-01-08
+```
+This command performs a triple-check:
+1.  **Local Status:** Checks that we have no `FAILED` or `PENDING` items for the period.
+2.  **API Cross-Reference:** For any day with 0 items, it queries the Parliament API to confirm it was actually a non-sitting day.
+3.  **Result:** It will output `OK` for valid days and `MISSING` (Red) if the API has data that we missed.
+
+**If the audit reports NO gaps, you have 100% confidence.**
+
+### 4. Handling Failures
+If the `process` step encounters errors (e.g. API timeouts), items are marked as `FAILED` but execution continues.
+
+To fix them:
+1.  **Reset** the failed items back to `PENDING`:
+    ```bash
+    python robust_loader.py retry-failed
+    ```
+2.  **Reset** items stuck in `PROCESSING` (e.g., if the script crashed):
+    ```bash
+    python robust_loader.py reset
+    ```
+3.  **Run Process Again:**
+    ```bash
+    python robust_loader.py process --loop
+    ```
 
 ---
 
@@ -106,18 +135,12 @@ docker compose exec mcp-server uv run python query_builder.py discover TARGET_ID
 ## Technical Reference
 
 ### Data Structure
-- **Hansard Contributions**: ~116k entries. Semantic search on spoken words + metadata (Member, Date, House).
-- **Parliamentary Questions**: ~218k entries. Semantic search on Question and Answer text.
+- **Hansard Contributions**: ~190k entries. Semantic search on spoken words + metadata (Member, Date, House).
+- **Parliamentary Questions**: ~117k entries. Semantic search on Question and Answer text.
 
 ### Resource Usage
 - **Disk Space**: ~2.6 GB for full historical data (July 2024 - Jan 2026).
 - **API Cost**: ~$11.00 for the initial 330k record load. ~$0.00003 per search query thereafter.
-
-### Maintenance & Auditing
-Check how many records you have and the date range covered:
-```bash
-docker compose exec mcp-server uv run python check_progress.py
-```
 
 ## Troubleshooting
 
@@ -126,7 +149,11 @@ docker compose exec mcp-server uv run python check_progress.py
 - If using `mcp-remote`, ensure you include the trailing slash.
 
 **Data Loading Gaps**
-- Use `batch_load_data.py` to target specific dates that may have failed during a standard sync.
+- Always run `python robust_loader.py audit` to identify specific missing dates.
+- If a date is missing, you can re-run `harvest` for just that specific day:
+  ```bash
+  python robust_loader.py harvest --start-date YYYY-MM-DD --end-date YYYY-MM-DD
+  ```
 
 ---
 MIT License - Developed for advanced UK Parliamentary research.

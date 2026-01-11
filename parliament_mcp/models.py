@@ -110,7 +110,7 @@ class Contribution(QdrantDocument):
         return res
 
     def to_chunks(self, chunker: BaseChunker) -> Generator[ChunkDict]:
-        chunks = chunker.chunk(self.ContributionTextFull)
+        chunks = chunker.chunk(self.ContributionTextFull or "")
         document = self.model_dump(mode="json")
         del document["ContributionTextFull"]
         del document["ContributionText"]
@@ -276,8 +276,8 @@ class ParliamentaryQuestion(QdrantDocument):
         return f"QUESTION: {self.questionText}\n ANSWER: {self.answerText}".strip()
 
     def to_chunks(self, chunker: BaseChunker) -> Generator[ChunkDict]:
-        question_chunks = chunker.chunk(self.questionText)
-        answer_chunks = chunker.chunk(self.answerText)
+        question_chunks = chunker.chunk(self.questionText or "")
+        answer_chunks = chunker.chunk(self.answerText or "")
         document = self.model_dump(mode="json")
         del document["questionText"]
         del document["answerText"]

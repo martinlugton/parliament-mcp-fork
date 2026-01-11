@@ -58,7 +58,7 @@ async def cached_limited_get(*args, **kwargs) -> httpx.Response:
         # In Lambda, use tempfile to get the temp directory securely
         cache_dir = str(Path(tempfile.gettempdir()) / ".cache" / "hishel")
     else:
-        cache_dir = ".cache/hishel"
+        cache_dir = "/app/.cache/hishel"
 
     async with (
         hishel.AsyncCacheClient(
@@ -124,8 +124,11 @@ class QdrantDataLoader:
         self.progress: Progress | None = None
         self.openai_client = get_openai_client(self.settings)
 
-        self.chunker = RecursiveChunker()
-        self.sparse_text_embedding = SparseTextEmbedding(model_name="Qdrant/bm25")
+        self.chunker = RecursiveChunker(chunk_size=self.settings.CHUNK_SIZE)
+        self.sparse_text_embedding = SparseTextEmbedding(
+            model_name="Qdrant/bm25",
+            cache_dir="/app/.cache/fastembed"
+        )
 
     async def get_total_results(self, url: str, params: dict, count_key: str = "TotalResultCount") -> int:
         """Get total results count from API endpoint"""
@@ -172,7 +175,11 @@ class QdrantDataLoader:
     async def store_in_qdrant_batch(self, documents: list[QdrantDocument]) -> None:
         """Store documents in Qdrant as chunked embeddings."""
         # Convert documents to chunks
+        logger.info("Chunking %d documents", len(documents))
         chunked_documents = list(chain.from_iterable(document.to_chunks(self.chunker) for document in documents))
+
+        # Filter out empty chunks
+        chunked_documents = [chunk for chunk in chunked_documents if chunk.get("text") and chunk["text"].strip()]
 
         if not chunked_documents:
             logger.debug("No chunks to store")
@@ -180,6 +187,7 @@ class QdrantDataLoader:
 
         # Generate embeddings for chunks
         chunk_texts = [chunk["text"] for chunk in chunked_documents]
+        logger.info("Generating dense embeddings for %d chunks", len(chunked_documents))
         embedded_chunks = await embed_batch(
             client=self.openai_client,
             texts=chunk_texts,
@@ -187,9 +195,11 @@ class QdrantDataLoader:
             dimensions=self.settings.EMBEDDING_DIMENSIONS,
         )
 
+        logger.info("Generating sparse embeddings for %d chunks", len(chunked_documents))
         sparse_embeddings = list(self.sparse_text_embedding.embed(chunk_texts))
 
         # Create points for chunks
+        logger.info("Creating PointStructs for %d chunks", len(chunked_documents))
         points = [
             PointStruct(
                 id=self._generate_point_id(chunk["chunk_id"]),
@@ -208,13 +218,14 @@ class QdrantDataLoader:
         ]
 
         # Upsert the chunks
+        logger.info("Upserting %d points to collection %s", len(points), self.collection_name)
         await self.qdrant_client.upsert(
             collection_name=self.collection_name,
             points=points,
             wait=False,
         )
 
-        logger.debug("Stored %d chunks in collection %s", len(points), self.collection_name)
+        logger.info("Successfully stored %d chunks in collection %s", len(points), self.collection_name)
 
 
 class QdrantHansardLoader(QdrantDataLoader):
@@ -265,14 +276,16 @@ class QdrantHansardLoader(QdrantDataLoader):
             self.progress.update(task, completed=total_results)
             return
 
-        semaphore = asyncio.Semaphore(5)
+        semaphore = asyncio.Semaphore(2)
 
         async def process_page(query_params: dict):
             """Fetch and process a single page"""
             retries = 3
+            skip = query_params.get("skip", 0)
             for attempt in range(retries):
                 try:
                     async with semaphore:
+                        logger.info("Fetching Hansard page (skip=%d) for %s", skip, contribution_type)
                         response = await cached_limited_get(url, params=query_params)
                         response.raise_for_status()
                         page_data = response.json()
@@ -289,6 +302,7 @@ class QdrantHansardLoader(QdrantDataLoader):
 
                         await self.store_in_qdrant_batch(valid_contributions)
                         self.progress.update(task, advance=len(contributions.Results))
+                        logger.info("Completed Hansard page (skip=%d) for %s", skip, contribution_type)
                         return # Success
                 except Exception as e:
                     if attempt < retries - 1:
@@ -381,14 +395,16 @@ class QdrantParliamentaryQuestionLoader(QdrantDataLoader):
         self.progress.start_task(task_id)
         self.progress.update(task_id, total=total_results, completed=0)
 
-        semaphore = asyncio.Semaphore(3)
+        semaphore = asyncio.Semaphore(2)
 
         async def process_page(query_params: dict):
             """Fetch and process a single page"""
             retries = 3
+            skip = query_params.get("skip", 0)
             for attempt in range(retries):
                 try:
                     async with semaphore:
+                        logger.info("Fetching PQ page (skip=%d) for %s", skip, date_type)
                         response = await cached_limited_get(url, params=query_params)
                         response.raise_for_status()
                         page_data = response.json()
@@ -413,6 +429,7 @@ class QdrantParliamentaryQuestionLoader(QdrantDataLoader):
                             await self.store_in_qdrant_batch(new_questions)
 
                         self.progress.update(task_id, advance=len(questions_response.questions))
+                        logger.info("Completed PQ page (skip=%d) for %s", skip, date_type)
                         return # Success
                 except Exception as e:
                     if attempt < retries - 1:

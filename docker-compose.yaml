@@ -25,6 +25,8 @@ services:
     env_file:
       - path: .env
         required: true
+    volumes:
+      - mcp_server_cache:/app/.cache
     networks:
       - parliament-mcp-network
     depends_on:
@@ -32,6 +34,8 @@ services:
 
 volumes:
   qdrant_data:
+    driver: local
+  mcp_server_cache:
     driver: local
 
 networks:

@@ -140,6 +140,23 @@ async def search_collection(
     return results
 
 
+async def count_points(
+    client: AsyncQdrantClient,
+    collection_name: str,
+    must_filters: list[dict[str, Any]] | None = None,
+) -> int:
+    """Count points in a collection with optional filters."""
+    count_filter = None
+    if must_filters:
+        count_filter = models.Filter(must=must_filters)
+
+    result = await client.count(
+        collection_name=collection_name,
+        count_filter=count_filter,
+    )
+    return result.count
+
+
 async def initialize_qdrant_collections(
     client: AsyncQdrantClient,
     settings: ParliamentMCPSettings,

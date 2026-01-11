@@ -119,6 +119,9 @@ class ParliamentMCPSettings(BaseSettings):
     # Rate limiting settings for parliament.uk API.
     HTTP_MAX_RATE_PER_SECOND: float = 10
 
+    # Rate limiting for OpenAI embedding requests.
+    EMBEDDING_MAX_RATE_PER_SECOND: float = 0.5
+
     # Load environment variables from .env file in local environment
     # from pydantic_settings import SettingsConfigDict
     if ENVIRONMENT == "local":
