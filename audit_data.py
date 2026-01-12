@@ -2,28 +2,7 @@ import asyncio
 from datetime import datetime, timedelta
 from qdrant_client import AsyncQdrantClient, models
 from parliament_mcp.settings import settings
-from parliament_mcp.qdrant_data_loaders import cached_limited_get, HANSARD_BASE_URL
-
-async def is_sitting_day(date_obj):
-    date_str = date_obj.strftime("%Y-%m-%d")
-    # Check Commons
-    url = f"{HANSARD_BASE_URL}/overview/sectionsforday.json"
-    try:
-        resp = await cached_limited_get(url, params={"date": date_str, "house": "Commons"})
-        resp.raise_for_status()
-        data_commons = resp.json()
-        
-        resp = await cached_limited_get(url, params={"date": date_str, "house": "Lords"})
-        resp.raise_for_status()
-        data_lords = resp.json()
-        
-        is_sitting = bool(data_commons or data_lords)
-        # if not is_sitting:
-        #     print(f"DEBUG: {date_str} is NOT a sitting day")
-        return is_sitting
-    except Exception as e:
-        print(f"Warning: Failed to check sitting status for {date_str}: {e}")
-        return True # Assume true on error to be safe
+from parliament_mcp.qdrant_data_loaders import cached_limited_get, HANSARD_BASE_URL, PQS_BASE_URL
 
 async def check_gaps(client, collection_name, date_field, start_date, end_date):
     print(f"\nAuditing {collection_name} from {start_date} to {end_date}...")
@@ -32,10 +11,6 @@ async def check_gaps(client, collection_name, date_field, start_date, end_date):
     missing_days = []
     
     while current_date <= end_date:
-        # Check if it's a weekend (optimization: usually not sitting, but we should verify if we want to be 100% robust)
-        # However, checking API for every day is slow.
-        # Strategy: If Qdrant has data, great. If not, THEN check if it was a sitting day.
-        
         date_str = current_date.strftime("%Y-%m-%d")
         
         # Robust way: use search/scroll with filter
@@ -58,18 +33,41 @@ async def check_gaps(client, collection_name, date_field, start_date, end_date):
         )
         
         if len(res[0]) == 0:
-            # No data in Qdrant. Was it a sitting day?
-            # We only check API if it's not a weekend, to save calls, 
-            # BUT parliament occasionally sits on weekends. 
-            # For "total confidence", we should check API if we suspect a gap.
-            # But checking API for every weekend is overkill and likely returns false.
-            # Let's check API for ALL missing days.
+            # No data in Qdrant. Check API to confirm if data SHOULD exist.
+            print(f"  Checking API for {date_str}...", end="\r")
             
-            print(f"  Checking source for potential gap: {date_str}...", end="\r")
-            if await is_sitting_day(current_date):
-                missing_days.append((current_date, current_date.weekday() >= 5))
-            else:
-                pass # Not a sitting day, so not a gap
+            api_count = 0
+            try:
+                if "hansard" in collection_name:
+                    # Check Hansard API
+                    for c_type in ["Spoken", "Written", "Corrections", "Petitions"]:
+                        url = f"{HANSARD_BASE_URL}/search/contributions/{c_type}.json"
+                        resp = await cached_limited_get(url, params={"startDate": date_str, "endDate": date_str, "take": 1})
+                        if resp.status_code == 200:
+                            api_count += resp.json().get("TotalResultCount", 0)
+                            if api_count > 0: break # Found some data, so it's a gap
+                            
+                elif "parliamentary_questions" in collection_name:
+                    # Check PQ API - Strictly align with the field being audited.
+                    if date_field == "dateTabled":
+                        url = f"{PQS_BASE_URL}/writtenquestions/questions"
+                        resp = await cached_limited_get(url, params={"tabledWhenFrom": date_str, "tabledWhenTo": date_str, "take": 1})
+                        if resp.status_code == 200:
+                            api_count = resp.json().get("totalResults", 0)
+                    else:
+                        # Fallback
+                        url = f"{PQS_BASE_URL}/writtenquestions/questions"
+                        resp = await cached_limited_get(url, params={f"{date_field}WhenFrom": date_str, f"{date_field}WhenTo": date_str, "take": 1})
+                        if resp.status_code == 200:
+                            api_count = resp.json().get("totalResults", 0)
+
+            except Exception as e:
+                print(f"  API Check failed for {date_str}: {e}")
+                continue
+
+            if api_count > 0:
+                print(f"  MISSING: {date_str} (API has {api_count} items)        ")
+                missing_days.append((current_date, f"API has {api_count} items"))
             
         current_date += timedelta(days=1)
     
@@ -105,11 +103,9 @@ async def main():
                 return
             
             print(f"\nDetected {len(gaps)} potential gaps in {name}:")
-            # Group consecutive days for cleaner output
             if gaps:
-                for date, is_weekend in gaps:
-                    tag = "[WEEKEND]" if is_weekend else ""
-                    print(f"  - {date} {tag}")
+                for date, reason in gaps:
+                    print(f"  - {date}: {reason}")
 
         print_gaps("Hansard", hansard_gaps)
         print_gaps("Parliamentary Questions", pq_gaps)

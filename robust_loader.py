@@ -365,9 +365,8 @@ class Processor:
         self.qm = queue_manager
         
     async def process_queue_loop(self, batch_size: int = 50, loop: bool = False, max_items: int = 0):
-        # Override settings for host execution
-        # We explicitly use localhost here to avoid any ambiguity
-        qdrant_url = "http://localhost:6333"
+        # Use settings for Qdrant URL
+        qdrant_url = settings.QDRANT_URL or "http://localhost:6333"
         
         client = AsyncQdrantClient(url=qdrant_url, api_key=settings.QDRANT_API_KEY, timeout=30)
         try:

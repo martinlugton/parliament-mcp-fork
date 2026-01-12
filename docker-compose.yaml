@@ -22,11 +22,13 @@ services:
     environment:
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
+      - QDRANT_URL=http://qdrant:6333
     env_file:
       - path: .env
         required: true
     volumes:
       - mcp_server_cache:/app/.cache
+      - ./loader_state.db:/app/loader_state.db
     networks:
       - parliament-mcp-network
     depends_on:

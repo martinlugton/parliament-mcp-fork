@@ -47,40 +47,47 @@ docker compose exec mcp-server uv run parliament-mcp init-qdrant
 
 We use a robust **Harvest-Process-Audit** workflow to ensure 100% of data for a given period is loaded, embedded, and searchable. This system handles API failures, rate limits, and network interruptions automatically.
 
-**The Master Script:** `robust_loader.py`
+**Important:** All maintenance scripts should be run **inside the container**. The project uses `uv` for dependency management, which is pre-installed in the Docker image. You do not need to install Python or `uv` on your host machine.
+
+**The Master Script:** `robust_loader.py` (Run via `docker compose exec mcp-server uv run python robust_loader.py ...`)
 
 #### Step 1: Initialize the Queue
-Create the local SQLite database that tracks every single item's state (`PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`).
+Create the local SQLite database (`loader_state.db`) that tracks every single item's state (`PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`).
 ```bash
-python robust_loader.py init-db
+docker compose exec mcp-server uv run python robust_loader.py init-db
 ```
 
 #### Step 2: Harvest Metadata
 Scan the Parliament API to find all available items for your date range. This is fast and just populates the "To-Do" list.
 ```bash
 # Example: Load everything from the 2024 Election to present
-python robust_loader.py harvest --start-date 2024-07-04 --end-date 2026-01-08
+docker compose exec mcp-server uv run python robust_loader.py harvest --start-date 2024-07-04 --end-date 2026-01-11
 ```
 
 #### Step 3: Process the Queue
 Fetch full text, generate embeddings (Azure OpenAI), and save to Qdrant. This is the heavy lifting.
 ```bash
 # Run in a loop until the queue is empty
-python robust_loader.py process --loop --batch-size 50
+docker compose exec mcp-server uv run python robust_loader.py process --loop --batch-size 50
 ```
-*Tip: You can stop (Ctrl+C) and restart this command at any time. It picks up exactly where it left off.*
+*Tip: You can stop (Ctrl+C) and restart this command at any time. It picks up exactly where it left off. The state is persisted in `loader_state.db` on your host.*
 
 #### Step 4: Verify Completeness (The Audit)
-**Crucial Step:** Run the audit command to prove that 100% of the data is loaded.
-```bash
-python robust_loader.py audit --start-date 2024-07-04 --end-date 2026-01-08
-```
-This command performs a triple-check:
-1.  **Local Status:** Checks that we have no `FAILED` or `PENDING` items for the period.
-2.  **API Cross-Reference:** For any day with 0 items, it queries the Parliament API to confirm it was actually a non-sitting day.
-3.  **Result:** It will output `OK` for valid days and `MISSING` (Red) if the API has data that we missed.
+**Crucial Step:** Run the audit scripts to prove that 100% of the data is loaded.
 
-**If the audit reports NO gaps, you have 100% confidence.**
+1.  **Check Queue Status:**
+    ```bash
+    docker compose exec mcp-server uv run python robust_loader.py audit --start-date 2024-07-04 --end-date 2026-01-11
+    ```
+    Checks that every day in the range has been successfully harvested and processed.
+
+2.  **Verify Database Content:**
+    ```bash
+    docker compose exec mcp-server uv run python audit_data.py
+    ```
+    Queries Qdrant directly to ensure records exist for every date. For any day with 0 records, it cross-references the live Parliament API to confirm if data actually exists for that day (avoiding false positives on non-sitting days).
+
+**If both audits report NO gaps, you have 100% confidence.**
 
 ### 4. Handling Failures
 If the `process` step encounters errors (e.g. API timeouts), items are marked as `FAILED` but execution continues.
@@ -88,15 +95,15 @@ If the `process` step encounters errors (e.g. API timeouts), items are marked as
 To fix them:
 1.  **Reset** the failed items back to `PENDING`:
     ```bash
-    python robust_loader.py retry-failed
+    docker compose exec mcp-server uv run python robust_loader.py retry-failed
     ```
 2.  **Reset** items stuck in `PROCESSING` (e.g., if the script crashed):
     ```bash
-    python robust_loader.py reset
+    docker compose exec mcp-server uv run python robust_loader.py reset
     ```
 3.  **Run Process Again:**
     ```bash
-    python robust_loader.py process --loop
+    docker compose exec mcp-server uv run python robust_loader.py process --loop
     ```
 
 ---
