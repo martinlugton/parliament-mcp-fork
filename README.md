@@ -147,7 +147,7 @@ docker compose exec mcp-server uv run python query_builder.py discover TARGET_ID
 
 ### Resource Usage
 - **Disk Space**: ~2.6 GB for full historical data (July 2024 - Jan 2026).
-- **API Cost**: ~$11.00 for the initial 330k record load. ~$0.00003 per search query thereafter.
+- **API Cost**: ~$72.00 for the initial load (July 2024 - Jan 2026) using `text-embedding-3-large`. ~$0.00003 per search query thereafter.
 
 ## Troubleshooting
 
