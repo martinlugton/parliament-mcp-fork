@@ -65,6 +65,15 @@ load_data_since_2020: init_qdrant
 	uv run parliament-mcp --log-level WARNING load-data hansard --from-date 2020-01-01 --to-date "today"
 	uv run parliament-mcp --log-level WARNING load-data parliamentary-questions --from-date 2020-01-01 --to-date "today"
 
+load_current_term: init_qdrant
+	uv run parliament-mcp --log-level WARNING load-data hansard --from-date 2024-07-04 --to-date "today"
+	uv run parliament-mcp --log-level WARNING load-data parliamentary-questions --from-date 2024-07-04 --to-date "today"
+
+load_current_term_robust: init_qdrant
+	uv run python robust_loader.py init-db
+	uv run python robust_loader.py harvest --start-date 2024-07-04
+	uv run python robust_loader.py process --loop
+
 .PHONY: ingest_daily
 ingest_daily: init_qdrant
 	uv run parliament-mcp --log-level WARNING load-data hansard --from-date "2 days ago" --to-date "today"

@@ -21,7 +21,19 @@ logging.basicConfig(
 logger = logging.getLogger("robust_loader")
 console = Console()
 
-DB_PATH = "loader_state.db"
+import os
+
+# Database Path Configuration
+# We check the root directory first (preferred for host-side persistence)
+# then fall back to the data/ directory (standard inside the container).
+if os.path.exists("loader_state.db"):
+    DB_PATH = "loader_state.db"
+    DATA_DIR = "."
+else:
+    DATA_DIR = "data"
+    if not os.path.exists(DATA_DIR):
+        os.makedirs(DATA_DIR)
+    DB_PATH = os.path.join(DATA_DIR, "loader_state.db")
 
 class QueueManager:
     def __init__(self, db_path=DB_PATH):
@@ -202,20 +214,29 @@ from aiolimiter import AsyncLimiter
 # HTTP rate limiter
 _http_client_rate_limiter = AsyncLimiter(max_rate=settings.HTTP_MAX_RATE_PER_SECOND, time_period=1.0)
 
-async def cached_limited_get(*args, **kwargs) -> httpx.Response:
+# Global client for reuse
+_global_http_client = httpx.AsyncClient(
+    timeout=120,
+    headers={"User-Agent": "parliament-mcp"},
+    transport=httpx.AsyncHTTPTransport(retries=3),
+)
+
+async def cached_limited_get(*args, client: httpx.AsyncClient = None, **kwargs) -> httpx.Response:
     """
     A wrapper around httpx.get that limits the rate of requests.
     Caching is disabled for the robust loader to avoid dependency issues.
     """
-    async with (
-        httpx.AsyncClient(
-            timeout=120,
-            headers={"User-Agent": "parliament-mcp"},
-            transport=httpx.AsyncHTTPTransport(retries=3),
-        ) as client,
-        _http_client_rate_limiter,
-    ):
-        return await client.get(*args, **kwargs)
+    async with _http_client_rate_limiter:
+        if client:
+            return await client.get(*args, **kwargs)
+        else:
+            # Fallback for when no client is provided
+            async with httpx.AsyncClient(
+                timeout=120,
+                headers={"User-Agent": "parliament-mcp"},
+                transport=httpx.AsyncHTTPTransport(retries=3),
+            ) as standalone_client:
+                return await standalone_client.get(*args, **kwargs)
 
 class Harvester:
     def __init__(self, queue_manager: QueueManager):
@@ -368,9 +389,11 @@ class Processor:
         # Use settings for Qdrant URL
         qdrant_url = settings.QDRANT_URL or "http://localhost:6333"
         
-        client = AsyncQdrantClient(url=qdrant_url, api_key=settings.QDRANT_API_KEY, timeout=30)
+        qdrant_client = AsyncQdrantClient(url=qdrant_url, api_key=settings.QDRANT_API_KEY, timeout=30)
+        # Use the global http client for all requests
+        http_client = _global_http_client
+        
         try:
-            qdrant_client = client
             # Initialize Loaders
             hansard_loader = QdrantHansardLoader(
                 qdrant_client=qdrant_client,
@@ -423,44 +446,53 @@ class Processor:
                 
                 # Process Hansard
                 if hansard_items:
-                    await self.process_hansard_items(hansard_loader, hansard_items)
+                    await self.process_hansard_items(hansard_loader, hansard_items, http_client)
                     
                 # Process PQs
                 if pq_items:
-                    await self.process_pq_items(pq_loader, pq_items)
+                    await self.process_pq_items(pq_loader, pq_items, http_client)
                     
                 total_processed_session += len(items)
 
         finally:
-            await client.close()
+            await qdrant_client.close()
 
-    async def process_hansard_items(self, loader: QdrantHansardLoader, items: list[dict]):
+    async def process_hansard_items(self, loader: QdrantHansardLoader, items: list[dict], http_client: httpx.AsyncClient):
         docs_to_store = []
         processed_ids = []
         
-        for item in items:
+        async def prepare_hansard(item):
             try:
                 meta = json.loads(item['metadata'])
                 if 'item_data' not in meta:
-                    self.qm.mark_failed(item['id'], "Missing item_data in metadata")
-                    continue
+                    return None, item['id'], "Missing item_data in metadata"
                 
                 # Reconstruct Contribution
                 contribution = Contribution.model_validate(meta['item_data'])
                 
                 if contribution.SittingDate:
+                    # Note: get_debate_parents currently uses internal client, we might want to optimize it too
+                    # but it is already relatively fast as it uses a local cache in the loader
                     contribution.debate_parents = await loader.get_debate_parents(
                         contribution.SittingDate.strftime("%Y-%m-%d"),
                         contribution.House,
                         contribution.DebateSectionExtId,
                     )
                 
-                docs_to_store.append(contribution)
-                processed_ids.append(item['id'])
-
+                return contribution, item['id'], None
             except Exception as e:
-                logger.error(f"Failed to process Hansard item {item['id']}: {e}")
-                self.qm.mark_failed(item['id'], str(e))
+                return None, item['id'], str(e)
+
+        # Run preparations in parallel
+        results = await asyncio.gather(*(prepare_hansard(item) for item in items))
+        
+        for doc, item_id, error in results:
+            if error:
+                logger.error(f"Failed to process Hansard item {item_id}: {error}")
+                self.qm.mark_failed(item_id, error)
+            elif doc:
+                docs_to_store.append(doc)
+                processed_ids.append(item_id)
         
         if docs_to_store:
             try:
@@ -472,27 +504,35 @@ class Processor:
                 for pid in processed_ids:
                     self.qm.mark_failed(pid, f"Batch upsert error: {e}")
     
-    async def process_pq_items(self, loader: QdrantParliamentaryQuestionLoader, items: list[dict]):
+    async def process_pq_items(self, loader: QdrantParliamentaryQuestionLoader, items: list[dict], http_client: httpx.AsyncClient):
         docs_to_store = []
         processed_ids = []
         
-        for item in items:
+        async def fetch_and_validate_pq(item):
             try:
                 meta = json.loads(item['metadata'])
                 pq_id = meta.get('id')
                 
                 url = f"{PQS_BASE_URL}/writtenquestions/questions/{pq_id}"
-                response = await cached_limited_get(url, params={"expandMember": True})
+                response = await cached_limited_get(url, params={"expandMember": True}, client=http_client)
                 response.raise_for_status()
                 data = response.json()
                 
                 pq = ParliamentaryQuestion.model_validate(data["value"])
-                docs_to_store.append(pq)
-                processed_ids.append(item['id'])
-                
+                return pq, item['id'], None
             except Exception as e:
-                logger.error(f"Failed to process PQ {item['id']}: {e}")
-                self.qm.mark_failed(item['id'], str(e))
+                return None, item['id'], str(e)
+
+        # Fetch all PQs in the batch concurrently
+        results = await asyncio.gather(*(fetch_and_validate_pq(item) for item in items))
+
+        for doc, item_id, error in results:
+            if error:
+                logger.error(f"Failed to process PQ {item_id}: {error}")
+                self.qm.mark_failed(item_id, error)
+            elif doc:
+                docs_to_store.append(doc)
+                processed_ids.append(item_id)
 
         if docs_to_store:
             try:
@@ -612,12 +652,33 @@ async def audit_command(args):
     am = AuditManager(qm)
     await am.audit_date_range(start_date, end_date, args.type)
 
+def stats_command(args):
+    qm = QueueManager()
+    stats = qm.get_stats()
+    
+    from rich.table import Table
+    table = Table(title="Robust Loader Stats")
+    table.add_column("Status", style="cyan")
+    table.add_column("Count", style="magenta")
+    
+    total = sum(stats.values())
+    for status, count in stats.items():
+        table.add_row(status, str(count))
+    
+    table.add_section()
+    table.add_row("TOTAL", str(total), style="bold")
+    
+    console.print(table)
+
 def main():
     parser = argparse.ArgumentParser(description="Robust Data Loader for Parliament MCP")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # init-db
     subparsers.add_parser("init-db", help="Initialize the local state database")
+
+    # stats
+    subparsers.add_parser("stats", help="Show current queue statistics")
 
     # harvest
     harvest_parser = subparsers.add_parser("harvest", help="Fetch IDs and populate the queue")
@@ -647,6 +708,8 @@ def main():
 
     if args.command == "init-db":
         init_db_command(args)
+    elif args.command == "stats":
+        stats_command(args)
     elif args.command == "harvest":
         asyncio.run(harvest_command(args))
     elif args.command == "process":

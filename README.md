@@ -43,68 +43,53 @@ docker compose up -d
 docker compose exec mcp-server uv run parliament-mcp init-qdrant
 ```
 
-### 3. Loading Historical Data (100% Confidence)
+### 3. Loading the Current Parliamentary Term (July 2024 - Present)
 
-We use a robust **Harvest-Process-Audit** workflow to ensure 100% of data for a given period is loaded, embedded, and searchable. This system handles API failures, rate limits, and network interruptions automatically.
+The system distinguishes between **Searchable Data** (ingested into Qdrant) and **Live Reference Data** (fetched in real-time).
 
-**Important:** All maintenance scripts should be run **inside the container**. The project uses `uv` for dependency management, which is pre-installed in the Docker image. You do not need to install Python or `uv` on your host machine.
+**Note:** For consistency, all commands below should be run inside the Docker container using `docker compose exec mcp-server`.
 
-**The Master Script:** `robust_loader.py` (Run via `docker compose exec mcp-server uv run python robust_loader.py ...`)
+#### A. Searchable Data (Hansard & PQs)
+These must be ingested and embedded to enable semantic search. We use a robust **Harvest-Process-Audit** workflow to handle API failures and rate limits automatically.
 
-#### Step 1: Initialize the Queue
-Create the local SQLite database (`loader_state.db`) that tracks every single item's state (`PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`).
+**Option 1: Quick Sync (Standard CLI)**
+*   **Method:** `make load_current_term`
+*   **Behavior:** Stateless. Fetches and pushes data in a single pass.
+*   **Best For:** Fast daily/weekly updates when you already have most data.
+*   **Note:** If interrupted, it does not track progress and may need to be re-run for the whole range.
+
+**Option 2: Robust Backfill (Recommended Default)**
+*   **Method:** `make load_current_term_robust`
+*   **Behavior:** Stateful. Uses a SQLite database (`loader_state.db`) in the project root to track every record ID.
+*   **Best For:** Initial setup or loading large historical ranges (months/years).
+*   **Benefit:** Resume-able. If the process crashes or you hit rate limits, it picks up exactly where it left off.
+*   **State Management:** The database is persisted in the project root as `loader_state.db` and is mounted into the container at `/app/data/loader_state.db`.
+
+*Note: Processing tens of thousands of records will take several hours and incur Azure OpenAI API costs for embeddings.*
+
+#### Monitoring & Maintenance
+You can monitor the progress of the robust loader or manage its state using these commands:
+
 ```bash
-docker compose exec mcp-server uv run python robust_loader.py init-db
+# Check current progress (counts of pending/completed items)
+docker compose exec mcp-server uv run python robust_loader.py stats
+
+# Retry failed items (marks FAILED items as PENDING)
+docker compose exec mcp-server uv run python robust_loader.py retry-failed
+
+# Reset stuck items (marks PROCESSING items as PENDING - use if script crashed)
+docker compose exec mcp-server uv run python robust_loader.py reset
 ```
 
-#### Step 2: Harvest Metadata
-Scan the Parliament API to find all available items for your date range. This is fast and just populates the "To-Do" list.
+#### B. Live Reference Data (Members & Committees)
+**No manual loading is required.** Member profiles, Committee memberships, and ministerial roles are fetched in real-time via the Parliament API. These tools (e.g., `search_members`, `get_committee_members`) are available as soon as the MCP server is running.
+
+#### C. Verify Completeness (The Audit)
+Run the audit scripts to ensure 100% of the searchable data is loaded.
 ```bash
-# Example: Load everything from the 2024 Election to present
-docker compose exec mcp-server uv run python robust_loader.py harvest --start-date 2024-07-04 --end-date 2026-01-11
+# Verify database content against live API counts
+docker compose exec mcp-server uv run python audit_data.py
 ```
-
-#### Step 3: Process the Queue
-Fetch full text, generate embeddings (Azure OpenAI), and save to Qdrant. This is the heavy lifting.
-```bash
-# Run in a loop until the queue is empty
-docker compose exec mcp-server uv run python robust_loader.py process --loop --batch-size 50
-```
-*Tip: You can stop (Ctrl+C) and restart this command at any time. It picks up exactly where it left off. The state is persisted in `loader_state.db` on your host.*
-
-#### Step 4: Verify Completeness (The Audit)
-**Crucial Step:** Run the audit scripts to prove that 100% of the data is loaded.
-
-1.  **Check Queue Status:**
-    ```bash
-    docker compose exec mcp-server uv run python robust_loader.py audit --start-date 2024-07-04 --end-date 2026-01-11
-    ```
-    Checks that every day in the range has been successfully harvested and processed.
-
-2.  **Verify Database Content:**
-    ```bash
-    docker compose exec mcp-server uv run python audit_data.py
-    ```
-    Queries Qdrant directly to ensure records exist for every date. For any day with 0 records, it cross-references the live Parliament API to confirm if data actually exists for that day (avoiding false positives on non-sitting days).
-
-**If both audits report NO gaps, you have 100% confidence.**
-
-### 4. Handling Failures
-If the `process` step encounters errors (e.g. API timeouts), items are marked as `FAILED` but execution continues.
-
-To fix them:
-1.  **Reset** the failed items back to `PENDING`:
-    ```bash
-    docker compose exec mcp-server uv run python robust_loader.py retry-failed
-    ```
-2.  **Reset** items stuck in `PROCESSING` (e.g., if the script crashed):
-    ```bash
-    docker compose exec mcp-server uv run python robust_loader.py reset
-    ```
-3.  **Run Process Again:**
-    ```bash
-    docker compose exec mcp-server uv run python robust_loader.py process --loop
-    ```
 
 ---
 
