@@ -28,7 +28,7 @@ services:
         required: true
     volumes:
       - mcp_server_cache:/app/.cache
-      - ./loader_state.db:/app/data/loader_state.db
+      - ./data/loader_state.db:/app/data/loader_state.db
       - ./parliament_mcp:/app/parliament_mcp
       - ./robust_loader.py:/app/robust_loader.py
     networks:

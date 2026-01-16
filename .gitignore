@@ -53,4 +53,4 @@ Thumbs.db
 .cache
 .parliament-test-qdrant-data
 
-loader_state.db
+data/

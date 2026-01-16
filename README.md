@@ -63,7 +63,7 @@ These must be ingested and embedded to enable semantic search. We use a robust *
 *   **Behavior:** Stateful. Uses a SQLite database (`loader_state.db`) in the project root to track every record ID.
 *   **Best For:** Initial setup or loading large historical ranges (months/years).
 *   **Benefit:** Resume-able. If the process crashes or you hit rate limits, it picks up exactly where it left off.
-*   **State Management:** The database is persisted in the project root as `loader_state.db` and is mounted into the container at `/app/data/loader_state.db`.
+*   **State Management:** The database is persisted in the `data/` directory as `data/loader_state.db` and is mounted into the container at `/app/data/loader_state.db`.
 
 *Note: Processing tens of thousands of records will take several hours and incur Azure OpenAI API costs for embeddings.*
 

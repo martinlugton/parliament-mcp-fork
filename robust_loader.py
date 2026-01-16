@@ -80,6 +80,25 @@ class QueueManager:
         finally:
             conn.close()
 
+    def add_items_batch(self, items: list[tuple]):
+        """Add multiple items to the queue efficiently.
+        items: list of (id, source_type, date, metadata) tuples
+        """
+        if not items:
+            return
+            
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        try:
+            cursor.executemany('''
+                INSERT OR IGNORE INTO queue (id, source_type, date, metadata)
+                VALUES (?, ?, ?, ?)
+            ''', items)
+            conn.commit()
+            return cursor.rowcount
+        finally:
+            conn.close()
+
     def get_pending_batch(self, limit: int = 100):
         """Get a batch of pending items."""
         conn = sqlite3.connect(self.db_path)
@@ -244,22 +263,36 @@ class Harvester:
         self.page_size = 100 # Large page size for faster harvesting
 
     async def harvest_date_range(self, start_date: date, end_date: date, harvest_type: str = "all"):
+        # Use a semaphore to process multiple days in parallel but not too many
+        semaphore = asyncio.Semaphore(5) 
+        
+        async def harvest_day(day_date: date):
+            async with semaphore:
+                date_str = day_date.strftime("%Y-%m-%d")
+                logger.info(f"Harvesting {date_str}...")
+                
+                tasks = []
+                if harvest_type in ["all", "hansard"]:
+                    for c_type in ["Spoken", "Written", "Corrections", "Petitions"]:
+                        tasks.append(self.harvest_hansard(date_str, c_type))
+                
+                if harvest_type in ["all", "pqs"]:
+                    tasks.append(self.harvest_pqs(date_str, "tabled"))
+                    tasks.append(self.harvest_pqs(date_str, "answered"))
+                
+                try:
+                    await asyncio.gather(*tasks)
+                except Exception as e:
+                    logger.error(f"Error harvesting day {date_str}: {e}")
+
+        tasks = []
         current_date = start_date
         while current_date <= end_date:
-            date_str = current_date.strftime("%Y-%m-%d")
-            logger.info(f"Harvesting {date_str}...")
-            
-            tasks = []
-            if harvest_type in ["all", "hansard"]:
-                for c_type in ["Spoken", "Written", "Corrections", "Petitions"]:
-                    tasks.append(self.harvest_hansard(date_str, c_type))
-            
-            if harvest_type in ["all", "pqs"]:
-                tasks.append(self.harvest_pqs(date_str, "tabled"))
-                tasks.append(self.harvest_pqs(date_str, "answered"))
-            
-            await asyncio.gather(*tasks)
+            tasks.append(harvest_day(current_date))
             current_date += timedelta(days=1)
+        
+        # Wait for all days to complete
+        await asyncio.gather(*tasks)
 
     async def harvest_hansard(self, date_str: str, contrib_type: str):
         url = f"{HANSARD_BASE_URL}/search/contributions/{contrib_type}.json"
@@ -278,8 +311,6 @@ class Harvester:
                 response.raise_for_status()
                 data = response.json()
                 
-                # Check for total results on first page to know if we are done? 
-                # Actually, we can just check if Results is empty.
                 if not data.get("Results"):
                     break
                 
@@ -287,6 +318,7 @@ class Harvester:
                 if not items:
                     break
 
+                batch_items = []
                 for item in items:
                     item_id = item.get("ContributionExtId") or item.get("Id")
                     queue_id = f"hansard_{item_id}" 
@@ -298,7 +330,10 @@ class Harvester:
                         "item_data": item
                     })
                     
-                    self.qm.add_item(queue_id, "hansard", date_str, meta)
+                    batch_items.append((queue_id, "hansard", date_str, meta))
+
+                if batch_items:
+                    self.qm.add_items_batch(batch_items)
 
                 skip += self.page_size
                 
@@ -328,7 +363,8 @@ class Harvester:
                 items = data.get("results", [])
                 if not items:
                     break
-                    
+                
+                batch_items = []
                 for item in items:
                     val = item.get("value", {})
                     pq_id = val.get("id")
@@ -340,7 +376,10 @@ class Harvester:
                         "type": date_type # tabled or answered
                     })
                     
-                    self.qm.add_item(queue_id, "pq", date_str, meta)
+                    batch_items.append((queue_id, "pq", date_str, meta))
+                
+                if batch_items:
+                    self.qm.add_items_batch(batch_items)
                 
                 skip += self.page_size
                 if skip >= data.get("totalResults", 0):
