@@ -47,7 +47,7 @@ docker compose exec mcp-server uv run parliament-mcp init-qdrant
 
 The system distinguishes between **Searchable Data** (ingested into Qdrant) and **Live Reference Data** (fetched in real-time).
 
-**Note:** For consistency, all commands below should be run inside the Docker container using `docker compose exec mcp-server`.
+**Note:** For consistency and to ensure access to the correct python environment and dependencies (managed by `uv`), all commands below should be run **inside the Docker container** using `docker compose exec mcp-server`.
 
 #### A. Searchable Data (Hansard & PQs)
 These must be ingested and embedded to enable semantic search. We use a robust **Harvest-Process-Audit** workflow to handle API failures and rate limits automatically.
@@ -60,10 +60,10 @@ These must be ingested and embedded to enable semantic search. We use a robust *
 
 **Option 2: Robust Backfill (Recommended Default)**
 *   **Method:** `make load_current_term_robust`
-*   **Behavior:** Stateful. Uses a SQLite database (`loader_state.db`) in the project root to track every record ID.
+*   **Behavior:** Stateful. Uses a SQLite database (`loader_state.db`) to track every record ID.
 *   **Best For:** Initial setup or loading large historical ranges (months/years).
 *   **Benefit:** Resume-able. If the process crashes or you hit rate limits, it picks up exactly where it left off.
-*   **State Management:** The database is persisted in the `data/` directory as `data/loader_state.db` and is mounted into the container at `/app/data/loader_state.db`.
+*   **State Management:** The database is persisted on the host at `data/loader_state.db` (mapped to `/app/data/loader_state.db` inside the container).
 
 *Note: Processing tens of thousands of records will take several hours and incur Azure OpenAI API costs for embeddings.*
 
@@ -133,6 +133,7 @@ docker compose exec mcp-server uv run python query_builder.py discover TARGET_ID
 ### Resource Usage
 - **Disk Space**: ~2.6 GB for full historical data (July 2024 - Jan 2026).
 - **API Cost**: ~$72.00 for the initial load (July 2024 - Jan 2026) using `text-embedding-3-large`. ~$0.00003 per search query thereafter.
+- **Load Time**: ~28 hours for the full backfill (July 2024 - Jan 2026) involving ~316k records.
 
 ## Troubleshooting
 
