@@ -1,5 +1,8 @@
 import logging
 import re
+import csv
+import os
+from datetime import datetime
 
 try:
     from itertools import batched
@@ -21,6 +24,33 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from parliament_mcp.settings import ParliamentMCPSettings, settings
 
 logger = logging.getLogger(__name__)
+
+class CostTracker:
+    def __init__(self, log_file="data/token_usage.csv"):
+        self.log_file = log_file
+        # Ensure directory exists
+        try:
+            os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
+            if not os.path.exists(self.log_file):
+                with open(self.log_file, "w", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["timestamp", "model", "prompt_tokens", "total_tokens", "cost_usd"])
+        except Exception as e:
+            logger.error(f"Failed to initialize CostTracker: {e}")
+
+    def log_usage(self, model: str, prompt_tokens: int, total_tokens: int):
+        # Pricing for text-embedding-3-large is $0.00013 / 1k tokens
+        price_per_1k = 0.00013
+        cost = (total_tokens / 1000) * price_per_1k
+        
+        try:
+            with open(self.log_file, "a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([datetime.now().isoformat(), model, prompt_tokens, total_tokens, f"{cost:.6f}"])
+        except Exception as e:
+            logger.error(f"Failed to log cost: {e}")
+
+_cost_tracker = CostTracker()
 
 # Global rate limiter for OpenAI embedding requests
 # We use max_rate=1 and adjust time_period to achieve the desired rate (e.g. 0.1 req/s = 1 req / 10s)
@@ -87,6 +117,11 @@ async def _embed_chunk(
                 model=model,
                 dimensions=dimensions,
             )
+        
+        # Log usage
+        if hasattr(response, 'usage'):
+            _cost_tracker.log_usage(model, response.usage.prompt_tokens, response.usage.total_tokens)
+
         return [item.embedding for item in response.data]
     except ValueError as e:
         logger.error("ValueError in _embed_chunk: %s. Batch size: %d", e, len(batch))
