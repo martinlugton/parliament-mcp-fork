@@ -216,10 +216,11 @@ async def search_contributions(
         Each dictionary contains:
             - contribution_id: ID of the contribution
             - text: Text of the contribution
-            - attributed_to: Member who made the contribution
+            - member_name: Member who made the contribution
             - date: Date of the contribution
             - house: House of the contribution
             - member_id: ID of the member who made the contribution
+            - debate_id: ID of the debate (used for get_full_debate_content)
     """
     ctx = mcp_server.get_context()
     qdrant_query_handler: QdrantQueryHandler = ctx.request_context.lifespan_context["qdrant_query_handler"]
@@ -232,6 +233,85 @@ async def search_contributions(
         house=house,
         max_results=max_results,
     )
+
+    if not result:
+        return "No results found"
+
+    return result
+
+
+@mcp_server.tool("get_full_debate_content")
+@log_tool_call
+async def get_full_debate_content(
+    debate_id: str = Field(..., description="The DebateSectionExtId of the debate to retrieve"),
+) -> Any:
+    """
+    Retrieve the full transcript of a specific debate.
+    This reconstructs the entire debate by gathering all contributions (speeches),
+    ordering them correctly, and returning the full text.
+
+    Common use cases:
+    - After finding a relevant speech via search_contributions, use the debate_id to read the whole debate.
+    - Read a full day's proceedings for a specific committee or session.
+
+    Returns:
+        List of contribution dictionaries in chronological order.
+    """
+    ctx = mcp_server.get_context()
+    qdrant_query_handler: QdrantQueryHandler = ctx.request_context.lifespan_context["qdrant_query_handler"]
+    result = await qdrant_query_handler.get_full_debate(debate_id=debate_id)
+
+    if not result:
+        return "No results found"
+
+    return result
+
+
+@mcp_server.tool("get_full_contribution_content")
+@log_tool_call
+async def get_full_contribution_content(
+    contribution_id: str = Field(..., description="The ContributionExtId of the contribution to retrieve"),
+) -> Any:
+    """
+    Retrieve the full text of a specific contribution (submission) by its ID.
+    This reconstructs the contribution from its vector chunks.
+
+    Common use cases:
+    - Read the full text of a long speech that was truncated in search results.
+    - Get a clean, unabridged version of a specific member's statement.
+
+    Returns:
+        A dictionary containing the full text and metadata for the contribution.
+    """
+    ctx = mcp_server.get_context()
+    qdrant_query_handler: QdrantQueryHandler = ctx.request_context.lifespan_context["qdrant_query_handler"]
+    result = await qdrant_query_handler.get_full_contribution(contribution_id=contribution_id)
+
+    if not result:
+        return "No results found"
+
+    return result
+
+
+@mcp_server.tool("get_contribution_context")
+@log_tool_call
+async def get_contribution_context(
+    contribution_id: str = Field(..., description="The ContributionExtId of the contribution to retrieve context for"),
+) -> Any:
+    """
+    Retrieve a specific contribution along with its immediate context (previous and next contributions).
+    This is useful for seeing a question and its answer, or an intervention and the response.
+
+    Common use cases:
+    - See the question that prompted a specific answer.
+    - See the immediate reaction/next speech following a contribution.
+
+    Returns:
+        List of up to 3 contributions (previous, target, next), sorted by their order in the debate.
+    """
+    ctx = mcp_server.get_context()
+    qdrant_query_handler: QdrantQueryHandler = ctx.request_context.lifespan_context["qdrant_query_handler"]
+    result = await qdrant_query_handler.get_contribution_neighbors(contribution_id=contribution_id)
 
     if not result:
         return "No results found"

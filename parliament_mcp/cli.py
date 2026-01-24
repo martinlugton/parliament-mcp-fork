@@ -53,7 +53,6 @@ async def init_qdrant(qdrant_client: AsyncQdrantClient, settings: ParliamentMCPS
     """Initialises Qdrant collections."""
     logger.info("Initialising Qdrant collections.")
     await initialize_qdrant_collections(qdrant_client, settings)
-    await create_collection_indicies(qdrant_client, settings)
 
 
 def create_parser():

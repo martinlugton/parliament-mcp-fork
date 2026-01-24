@@ -185,6 +185,9 @@ async def initialize_qdrant_collections(
         settings.EMBEDDING_DIMENSIONS,
     )
 
+    # Ensure all payload indexes are created
+    await create_collection_indicies(client, settings)
+
     logger.info("Qdrant initialization complete.")
 
 
@@ -281,6 +284,26 @@ async def create_collection_indicies(client: AsyncQdrantClient, settings: Parlia
         field_name="DebateSectionExtId",
         field_schema=models.KeywordIndexParams(
             type=models.KeywordIndexType.KEYWORD,
+        ),
+        wait=True,
+    )
+
+    await client.create_payload_index(
+        collection_name=settings.HANSARD_CONTRIBUTIONS_COLLECTION,
+        field_name="ContributionExtId",
+        field_schema=models.KeywordIndexParams(
+            type=models.KeywordIndexType.KEYWORD,
+        ),
+        wait=True,
+    )
+
+    await client.create_payload_index(
+        collection_name=settings.HANSARD_CONTRIBUTIONS_COLLECTION,
+        field_name="OrderInDebateSection",
+        field_schema=models.IntegerIndexParams(
+            type=models.IntegerIndexType.INTEGER,
+            lookup=True,
+            range=True,
         ),
         wait=True,
     )

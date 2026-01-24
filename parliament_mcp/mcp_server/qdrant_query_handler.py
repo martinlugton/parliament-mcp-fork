@@ -311,7 +311,9 @@ class QdrantQueryHandler:
                     "member_name": payload.get("MemberName"),
                     "relevance_score": result.score if hasattr(result, "score") else 1.0,
                     "debate_title": payload.get("DebateSection", ""),
+                    "debate_id": payload.get("DebateSectionExtId"),
                     "debate_url": payload.get("debate_url", ""),
+                    "contribution_id": payload.get("ContributionExtId"),
                     "contribution_url": payload.get("contribution_url", ""),
                     "order_in_debate": payload.get("OrderInDebateSection"),
                     "debate_parents": payload.get("debate_parents", []),
@@ -642,3 +644,275 @@ class QdrantQueryHandler:
             )
         # return the most recently updated question
         return [result for _, result in sorted(results, key=lambda x: x[0], reverse=True)]
+
+    async def get_full_debate(self, debate_id: str) -> list[dict]:
+        """
+        Retrieve the full content of a debate by its ID.
+        Reconstructs contributions from chunks and sorts them by order.
+        """
+        # Filter by debate ID
+        query_filter = models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="DebateSectionExtId",
+                    match=models.MatchValue(value=debate_id),
+                )
+            ]
+        )
+
+        # Scroll to get all chunks for this debate
+        all_points = []
+        next_page_offset = None
+        
+        while True:
+            points, next_page_offset = await self.qdrant_client.scroll(
+                collection_name=self.settings.HANSARD_CONTRIBUTIONS_COLLECTION,
+                scroll_filter=query_filter,
+                limit=1000,
+                with_payload=True,
+                with_vectors=False,
+                offset=next_page_offset,
+            )
+            all_points.extend(points)
+            if next_page_offset is None:
+                break
+
+        if not all_points:
+            return []
+
+        # Group chunks by contribution (using document_uri or equivalent unique ID)
+        # We can use the 'id' of the point, but we need to know which contribution it belongs to.
+        # The payload contains 'ContributionExtId' or we can infer from 'chunk_id' structure if available,
+        # but 'ContributionExtId' might be None for some.
+        # However, 'OrderInDebateSection' + 'DebateSectionExtId' should be unique per contribution if 'ContributionExtId' is missing.
+        # Let's rely on grouping by the prefix of the chunk_id if possible, or OrderInDebateSection.
+        
+        # Actually, in models.py: chunk_id = f"{self.document_uri}_chunk_{chunk_id}"
+        # So we can group by extracting the document_uri from the chunk_id (everything before the last _chunk_)
+        
+        contributions_map = defaultdict(list)
+        
+        for point in all_points:
+            payload = point.payload
+            chunk_id_str = payload.get("chunk_id", "")
+            
+            # Extract base ID (everything before the last _chunk_X)
+            # Find the last occurrence of "_chunk_"
+            if "_chunk_" in chunk_id_str:
+                base_id = chunk_id_str.rsplit("_chunk_", 1)[0]
+                chunk_index = int(chunk_id_str.rsplit("_chunk_", 1)[1])
+            else:
+                # Fallback if naming convention changes, though it shouldn't based on models.py
+                base_id = payload.get("ContributionExtId") or f"{payload.get('OrderInDebateSection')}"
+                chunk_index = 0
+
+            contributions_map[base_id].append((chunk_index, point))
+
+        results = []
+        
+        for base_id, chunks in contributions_map.items():
+            # Sort chunks by index
+            chunks.sort(key=lambda x: x[0])
+            
+            # Reconstruct full text
+            full_text = "".join(chunk[1].payload.get("text", "") for chunk in chunks)
+            
+            # Get metadata from the first chunk (should be same for all)
+            first_payload = chunks[0][1].payload
+            
+            results.append({
+                "contribution_id": base_id,
+                "text": full_text,
+                "speaker": first_payload.get("AttributedTo"),
+                "member_id": first_payload.get("MemberId"),
+                "member_name": first_payload.get("MemberName"),
+                "order_in_debate": first_payload.get("OrderInDebateSection"),
+                "house": first_payload.get("House"),
+                "date": first_payload.get("SittingDate"),
+                "debate_section": first_payload.get("DebateSection"),
+                "debate_id": first_payload.get("DebateSectionExtId"),
+            })
+
+        # Sort contributions by order in debate
+        results.sort(key=lambda x: x.get("order_in_debate") or 0)
+        
+        return results
+
+    async def get_full_contribution(self, contribution_id: str) -> dict | None:
+        """
+        Retrieve the full content of a specific contribution by its ID.
+        Reconstructs the contribution from chunks.
+        """
+        # Filter by ContributionExtId
+        query_filter = models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="ContributionExtId",
+                    match=models.MatchValue(value=contribution_id),
+                )
+            ]
+        )
+
+        # Scroll to get all chunks for this contribution
+        all_points = []
+        next_page_offset = None
+        
+        while True:
+            points, next_page_offset = await self.qdrant_client.scroll(
+                collection_name=self.settings.HANSARD_CONTRIBUTIONS_COLLECTION,
+                scroll_filter=query_filter,
+                limit=100, # Contributions shouldn't be massive, 100 chunks is plenty
+                with_payload=True,
+                with_vectors=False,
+                offset=next_page_offset,
+            )
+            all_points.extend(points)
+            if next_page_offset is None:
+                break
+
+        if not all_points:
+            return None
+
+        # Sort chunks by chunk_id index
+        # chunk_id format: ..._chunk_{index}
+        def get_chunk_index(point):
+            chunk_id_str = point.payload.get("chunk_id", "")
+            if "_chunk_" in chunk_id_str:
+                return int(chunk_id_str.rsplit("_chunk_", 1)[1])
+            return 0
+
+        all_points.sort(key=get_chunk_index)
+
+        # Reconstruct full text
+        full_text = "".join(point.payload.get("text", "") for point in all_points)
+        
+        # Get metadata from the first chunk
+        first_payload = all_points[0].payload
+        
+        return {
+            "contribution_id": first_payload.get("ContributionExtId"),
+            "text": full_text,
+            "speaker": first_payload.get("AttributedTo"),
+            "member_id": first_payload.get("MemberId"),
+            "member_name": first_payload.get("MemberName"),
+            "order_in_debate": first_payload.get("OrderInDebateSection"),
+            "house": first_payload.get("House"),
+            "date": first_payload.get("SittingDate"),
+            "debate_section": first_payload.get("DebateSection"),
+            "debate_id": first_payload.get("DebateSectionExtId"),
+            "debate_url": first_payload.get("debate_url"),
+            "contribution_url": first_payload.get("contribution_url"),
+        }
+
+    async def get_contribution_neighbors(self, contribution_id: str) -> list[dict]:
+        """
+        Retrieve the contribution itself plus the one immediately before and after it.
+        Useful for context (question/answer pairs).
+        """
+        # 1. Get target contribution metadata
+        # We use a limit=1 scroll to get just one chunk of the target
+        target_filter = models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="ContributionExtId",
+                    match=models.MatchValue(value=contribution_id),
+                )
+            ]
+        )
+        
+        points, _ = await self.qdrant_client.scroll(
+            collection_name=self.settings.HANSARD_CONTRIBUTIONS_COLLECTION,
+            scroll_filter=target_filter,
+            limit=1,
+            with_payload=True,
+            with_vectors=False,
+        )
+        
+        if not points:
+            return []
+            
+        payload = points[0].payload
+        debate_id = payload.get("DebateSectionExtId")
+        order = payload.get("OrderInDebateSection")
+        
+        if debate_id is None or order is None:
+            # Fallback: if we can't determine order, return just the target wrapped in list
+            result = await self.get_full_contribution(contribution_id)
+            return [result] if result else []
+            
+        # 2. Query neighbors
+        # Range: [order-1, order+1]
+        neighbor_filter = models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="DebateSectionExtId",
+                    match=models.MatchValue(value=debate_id),
+                ),
+                models.FieldCondition(
+                    key="OrderInDebateSection",
+                    range=models.Range(
+                        gte=order - 1,
+                        lte=order + 1
+                    ),
+                )
+            ]
+        )
+        
+        # Scroll to get all chunks for these 3 (max) contributions
+        all_points = []
+        next_page_offset = None
+        while True:
+            points, next_page_offset = await self.qdrant_client.scroll(
+                collection_name=self.settings.HANSARD_CONTRIBUTIONS_COLLECTION,
+                scroll_filter=neighbor_filter,
+                limit=300, # 3 contributions * ~100 chunks
+                with_payload=True,
+                with_vectors=False,
+                offset=next_page_offset,
+            )
+            all_points.extend(points)
+            if next_page_offset is None:
+                break
+                
+        if not all_points:
+            return []
+
+        # 3. Reconstruct
+        contributions_map = defaultdict(list)
+        for point in all_points:
+            payload = point.payload
+            # Use ContributionExtId or fallback
+            base_id = payload.get("ContributionExtId") or f"{payload.get('OrderInDebateSection')}"
+            
+            chunk_id_str = payload.get("chunk_id", "")
+            if "_chunk_" in chunk_id_str:
+                chunk_index = int(chunk_id_str.rsplit("_chunk_", 1)[1])
+            else:
+                chunk_index = 0
+                
+            contributions_map[base_id].append((chunk_index, point))
+
+        results = []
+        for base_id, chunks in contributions_map.items():
+            chunks.sort(key=lambda x: x[0])
+            full_text = "".join(chunk[1].payload.get("text", "") for chunk in chunks)
+            first_payload = chunks[0][1].payload
+            
+            results.append({
+                "contribution_id": base_id,
+                "text": full_text,
+                "speaker": first_payload.get("AttributedTo"),
+                "member_id": first_payload.get("MemberId"),
+                "member_name": first_payload.get("MemberName"),
+                "order_in_debate": first_payload.get("OrderInDebateSection"),
+                "house": first_payload.get("House"),
+                "date": first_payload.get("SittingDate"),
+                "debate_section": first_payload.get("DebateSection"),
+                "debate_id": first_payload.get("DebateSectionExtId"),
+                "debate_url": first_payload.get("debate_url"),
+                "contribution_url": first_payload.get("contribution_url"),
+            })
+
+        # Sort by order
+        results.sort(key=lambda x: x.get("order_in_debate") or 0)
+        return results
