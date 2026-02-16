@@ -93,6 +93,66 @@ docker compose exec mcp-server uv run python audit_data.py
 
 ---
 
+## Data Portability (Transferring to another machine)
+
+To avoid re-downloading and re-embedding all data (which incurs time and API costs), you can transfer your existing Qdrant data using snapshots and Google Drive Desktop.
+
+### Prerequisites
+- Google Drive Desktop installed and signed in on both machines (assumed mount point `G:\`).
+- Docker running on both machines.
+
+### Phase 1: Export (Source Machine)
+
+1.  **Create the Snapshots**:
+    ```powershell
+    curl.exe -X POST "http://localhost:6333/collections/parliament_mcp_hansard_contributions/snapshots"
+    curl.exe -X POST "http://localhost:6333/collections/parliament_mcp_parliamentary_questions/snapshots"
+    ```
+
+2.  **Copy Snapshots to Google Drive**:
+    ```powershell
+    # Create the destination folder
+    mkdir "G:\My Drive\QdrantTransfer" -ErrorAction SilentlyContinue
+
+    # Find and copy the latest Hansard snapshot
+    $H_FILE = docker exec qdrant sh -c "ls /qdrant/snapshots/parliament_mcp_hansard_contributions/*.snapshot | sort -r | head -n 1"
+    docker cp "qdrant:$H_FILE" "G:\My Drive\QdrantTransfer\hansard.snapshot"
+
+    # Find and copy the latest PQs snapshot
+    $PQ_FILE = docker exec qdrant sh -c "ls /qdrant/snapshots/parliament_mcp_parliamentary_questions/*.snapshot | sort -r | head -n 1"
+    docker cp "qdrant:$PQ_FILE" "G:\My Drive\QdrantTransfer\pqs.snapshot"
+    ```
+
+### Phase 2: Import (Destination Machine)
+
+*Wait for Google Drive to finish syncing (the blue icon becomes a green checkmark).*
+
+1.  **Prepare the New Container**:
+    Ensure services are running: `docker compose up -d`.
+
+2.  **Copy Snapshots into the Container**:
+    ```powershell
+    docker cp "G:\My Drive\QdrantTransfer\hansard.snapshot" qdrant:/qdrant/hansard.snapshot
+    docker cp "G:\My Drive\QdrantTransfer\pqs.snapshot" qdrant:/qdrant/pqs.snapshot
+    ```
+
+3.  **Trigger the Recovery**:
+    ```powershell
+    # Restore Hansard
+    curl.exe -X POST "http://localhost:6333/collections/parliament_mcp_hansard_contributions/snapshots/recover" `
+        -H "Content-Type: application/json" `
+        -d '{"location": "snapshot:///qdrant/hansard.snapshot"}'
+
+    # Restore PQs
+    curl.exe -X POST "http://localhost:6333/collections/parliament_mcp_parliamentary_questions/snapshots/recover" `
+        -H "Content-Type: application/json" `
+        -d '{"location": "snapshot:///qdrant/pqs.snapshot"}'
+    ```
+
+*Note: Recovery will replace any existing collection of the same name on the target machine with the version from the snapshot.*
+
+---
+
 ## Usage Modes
 
 ### A. Conversational (Claude Desktop)
