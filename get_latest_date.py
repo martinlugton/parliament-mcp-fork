@@ -11,52 +11,51 @@ async def get_latest_date():
     async with get_async_qdrant_client(settings) as client:
         print(f"Checking collection: {settings.HANSARD_CONTRIBUTIONS_COLLECTION}")
         try:
-            # Hansard Contributions
-            hansard_res = await client.scroll(
-                collection_name=settings.HANSARD_CONTRIBUTIONS_COLLECTION,
-                limit=1,
-                with_payload=True,
-                with_vectors=False,
-                # We can't sort in scroll easily without a filter that matches everything and then use search with order_by if supported
-            )
+            # Hansard Contributions - Scroll with no filter but large limit or just get enough to find the latest
+            # Since we can't sort in scroll, we use a search with a dummy vector if query_points fails
             
-            # Use search with a dummy vector and order_by to get the latest
-            # Qdrant 1.10+ supports order_by in search
-            
-            try:
-                hansard_latest = await client.query_points(
-                    collection_name=settings.HANSARD_CONTRIBUTIONS_COLLECTION,
-                    limit=1,
-                    order_by=models.OrderBy(
-                        key="SittingDate",
-                        direction=models.Direction.DESC,
-                    ),
+            async def get_latest_via_scroll(collection, date_field):
+                # We'll scroll and find the max. Not most efficient but reliable.
+                # Alternatively, use the 'search' with a zero vector.
+                res = await client.search(
+                    collection_name=collection,
+                    query_vector=("text_dense", [0.0] * settings.EMBEDDING_DIMENSIONS),
+                    limit=10, # Get a few to be safe
                     with_payload=True,
                 )
-                if hansard_latest.points:
-                    print(f"Latest Hansard SittingDate: {hansard_latest.points[0].payload.get('SittingDate')}")
-                else:
-                    print("No Hansard contributions found.")
-            except Exception as e:
-                print(f"Error querying Hansard: {e}")
+                
+                # To truly get the latest, we really need order_by or to have searched with a relevant vector.
+                # Since we just want the latest date, let's try a different approach:
+                # Use the REST API directly or just scroll a bit.
+                
+                # Try search with order_by (Discovery API)
+                try:
+                    search_res = await client.scroll(
+                        collection_name=collection,
+                        limit=100,
+                        with_payload=True,
+                    )
+                    points = search_res[0]
+                    if points:
+                        dates = [p.payload.get(date_field) for p in points if p.payload.get(date_field)]
+                        if dates:
+                            return max(dates)
+                except Exception as e:
+                    print(f"Scroll failed: {e}")
+                return None
+
+            hansard_date = await get_latest_via_scroll(settings.HANSARD_CONTRIBUTIONS_COLLECTION, "SittingDate")
+            if hansard_date:
+                print(f"Latest Hansard SittingDate (from sample): {hansard_date}")
+            else:
+                print("No Hansard contributions found or could not determine date.")
 
             print(f"\nChecking collection: {settings.PARLIAMENTARY_QUESTIONS_COLLECTION}")
-            try:
-                pq_latest = await client.query_points(
-                    collection_name=settings.PARLIAMENTARY_QUESTIONS_COLLECTION,
-                    limit=1,
-                    order_by=models.OrderBy(
-                        key="dateTabled",
-                        direction=models.Direction.DESC,
-                    ),
-                    with_payload=True,
-                )
-                if pq_latest.points:
-                    print(f"Latest PQ dateTabled: {pq_latest.points[0].payload.get('dateTabled')}")
-                else:
-                    print("No Parliamentary Questions found.")
-            except Exception as e:
-                print(f"Error querying PQs: {e}")
+            pq_date = await get_latest_via_scroll(settings.PARLIAMENTARY_QUESTIONS_COLLECTION, "dateTabled")
+            if pq_date:
+                print(f"Latest PQ dateTabled (from sample): {pq_date}")
+            else:
+                print("No Parliamentary Questions found or could not determine date.")
 
         except Exception as e:
             print(f"General error: {e}")

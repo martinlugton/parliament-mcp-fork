@@ -709,6 +709,35 @@ def stats_command(args):
     
     console.print(table)
 
+async def sync_command(args):
+    qm = QueueManager()
+    qm.init_db()
+    
+    conn = sqlite3.connect(qm.db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT MAX(date) FROM queue")
+    last_date_str = cursor.fetchone()[0]
+    conn.close()
+    
+    if not last_date_str:
+        logger.warning("No existing data in queue. Use 'harvest' with --start-date for initial load.")
+        return
+        
+    start_date = datetime.strptime(last_date_str, "%Y-%m-%d").date()
+    end_date = datetime.now(UTC).date()
+    
+    if start_date >= end_date:
+        logger.info(f"Already up to date (Last date: {last_date_str})")
+        return
+        
+    logger.info(f"Syncing from {start_date} to {end_date}...")
+    harvester = Harvester(qm)
+    await harvester.harvest_date_range(start_date, end_date, "all")
+    
+    if args.process:
+        processor = Processor(qm)
+        await processor.process_queue_loop(loop=True)
+
 def main():
     parser = argparse.ArgumentParser(description="Robust Data Loader for Parliament MCP")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -718,6 +747,10 @@ def main():
 
     # stats
     subparsers.add_parser("stats", help="Show current queue statistics")
+
+    # sync
+    sync_parser = subparsers.add_parser("sync", help="Automatically harvest from the last known date")
+    sync_parser.add_argument("--process", action="store_true", help="Start processing after harvest")
 
     # harvest
     harvest_parser = subparsers.add_parser("harvest", help="Fetch IDs and populate the queue")
@@ -749,6 +782,8 @@ def main():
         init_db_command(args)
     elif args.command == "stats":
         stats_command(args)
+    elif args.command == "sync":
+        asyncio.run(sync_command(args))
     elif args.command == "harvest":
         asyncio.run(harvest_command(args))
     elif args.command == "process":

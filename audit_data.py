@@ -73,12 +73,26 @@ async def check_gaps(client, collection_name, date_field, start_date, end_date):
     
     return missing_days
 
+import argparse
+
 async def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--start-date", help="YYYY-MM-DD")
+    parser.add_argument("--end-date", help="YYYY-MM-DD")
+    args = parser.parse_args()
+
     client = AsyncQdrantClient(url=settings.QDRANT_URL, api_key=settings.QDRANT_API_KEY)
     
     # Start of 2024 Parliament
-    start_date = datetime(2024, 7, 4).date()
-    end_date = datetime.now().date()
+    if args.start_date:
+        start_date = datetime.strptime(args.start_date, "%Y-%m-%d").date()
+    else:
+        start_date = datetime(2024, 7, 4).date()
+        
+    if args.end_date:
+        end_date = datetime.strptime(args.end_date, "%Y-%m-%d").date()
+    else:
+        end_date = datetime.now().date()
     
     try:
         hansard_gaps = await check_gaps(

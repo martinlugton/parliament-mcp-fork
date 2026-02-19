@@ -43,45 +43,52 @@ docker compose up -d
 docker compose exec mcp-server uv run parliament-mcp init-qdrant
 ```
 
-### 3. Loading the Current Parliamentary Term (July 2024 - Present)
+### 3. Loading and Synchronizing Data
 
 The system distinguishes between **Searchable Data** (ingested into Qdrant) and **Live Reference Data** (fetched in real-time).
 
-**Note:** For consistency and to ensure access to the correct python environment and dependencies (managed by `uv`), all commands below should be run **inside the Docker container** using `docker compose exec mcp-server`.
-
-#### A. Searchable Data (Hansard & PQs)
-These must be ingested and embedded to enable semantic search. We use a robust **Harvest-Process-Audit** workflow to handle API failures and rate limits automatically.
-
-**Option 1: Quick Sync (Standard CLI)**
-*   **Method:** `make load_current_term`
-*   **Behavior:** Stateless. Fetches and pushes data in a single pass.
-*   **Best For:** Fast daily/weekly updates when you already have most data.
-*   **Note:** If interrupted, it does not track progress and may need to be re-run for the whole range.
-
-**Option 2: Robust Backfill (Recommended Default)**
-*   **Method:** `make load_current_term_robust`
-*   **Behavior:** Stateful. Uses a SQLite database (`loader_state.db`) to track every record ID.
-*   **Best For:** Initial setup or loading large historical ranges (months/years).
-*   **Benefit:** Resume-able. If the process crashes or you hit rate limits, it picks up exactly where it left off.
-*   **State Management:** The database is persisted on the host at `data/loader_state.db` (mapped to `/app/data/loader_state.db` inside the container).
-
-*Note: Processing tens of thousands of records will take several hours and incur Azure OpenAI API costs for embeddings.*
-
-#### Monitoring & Maintenance
-You can monitor the progress of the robust loader or manage its state using these commands:
+#### A. Initial Load (Current Parliamentary Term: July 2024 - Present)
+For the first time setup, use the robust backfill to ensure all historical data is captured.
 
 ```bash
-# Check current progress (counts of pending/completed items)
+# Initialize Qdrant and perform initial backfill
+docker compose exec mcp-server make load_current_term_robust
+```
+
+#### B. Daily Synchronization (Catching Up)
+To keep the data up to date, run the sync commands regularly.
+
+**Option 1: Robust Sync (Recommended)**
+Uses the stateful loader to identify the last date and harvest missing items.
+```bash
+docker compose exec mcp-server make sync_robust
+```
+
+**Option 2: Quick Sync**
+Fast, stateless sync for the last few days.
+```bash
+docker compose exec mcp-server make sync
+```
+
+#### Monitoring & Maintenance
+You can monitor progress or manage the state of the robust loader:
+
+```bash
+# Check current progress and latest dates in the local queue
 docker compose exec mcp-server uv run python robust_loader.py stats
+docker compose exec mcp-server uv run python get_db_dates.py
+
+# Check the latest dates successfully stored in Qdrant
+docker compose exec mcp-server uv run python get_latest_date.py
 
 # Retry failed items (marks FAILED items as PENDING)
 docker compose exec mcp-server uv run python robust_loader.py retry-failed
 
-# Reset stuck items (marks PROCESSING items as PENDING - use if script crashed)
+# Reset stuck items (marks PROCESSING items as PENDING)
 docker compose exec mcp-server uv run python robust_loader.py reset
 ```
 
-#### B. Live Reference Data (Members & Committees)
+#### C. Live Reference Data (Members & Committees)
 **No manual loading is required.** Member profiles, Committee memberships, and ministerial roles are fetched in real-time via the Parliament API. These tools (e.g., `search_members`, `get_committee_members`) are available as soon as the MCP server is running.
 
 #### C. Verify Completeness (The Audit)

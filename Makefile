@@ -74,6 +74,13 @@ load_current_term_robust: init_qdrant
 	uv run python robust_loader.py harvest --start-date 2024-07-04
 	uv run python robust_loader.py process --loop
 
+sync: init_qdrant
+	uv run parliament-mcp --log-level WARNING load-data hansard --from-date "3 days ago" --to-date "today"
+	uv run parliament-mcp --log-level WARNING load-data parliamentary-questions --from-date "3 days ago" --to-date "today"
+
+sync_robust: init_qdrant
+	uv run python robust_loader.py sync --process
+
 .PHONY: ingest_daily
 ingest_daily: init_qdrant
 	uv run parliament-mcp --log-level WARNING load-data hansard --from-date "2 days ago" --to-date "today"
