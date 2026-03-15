@@ -29,8 +29,7 @@ services:
     volumes:
       - mcp_server_cache:/app/.cache
       - ./data:/app/data
-      - ./parliament_mcp:/app/parliament_mcp
-      - ./robust_loader.py:/app/robust_loader.py
+      - .:/app
     networks:
       - parliament-mcp-network
     depends_on:

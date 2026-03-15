@@ -81,6 +81,9 @@ docker compose exec mcp-server uv run python get_db_dates.py
 # Check the latest dates successfully stored in Qdrant
 docker compose exec mcp-server uv run python get_latest_date.py
 
+# Check API embedding costs
+docker compose exec mcp-server uv run python calculate_cost.py
+
 # Retry failed items (marks FAILED items as PENDING)
 docker compose exec mcp-server uv run python robust_loader.py retry-failed
 
