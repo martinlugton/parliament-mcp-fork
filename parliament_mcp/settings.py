@@ -118,7 +118,7 @@ class ParliamentMCPSettings(BaseSettings):
 
     # Allowed hosts for MCP transport security (comma-separated)
     # Used to prevent DNS rebinding attacks
-    MCP_ALLOWED_HOSTS: str = "localhost,127.0.0.1"
+    MCP_ALLOWED_HOSTS: str = "localhost,127.0.0.1,localhost:8080,127.0.0.1:8080"
 
     # Rate limiting settings for parliament.uk API.
     HTTP_MAX_RATE_PER_SECOND: float = 10

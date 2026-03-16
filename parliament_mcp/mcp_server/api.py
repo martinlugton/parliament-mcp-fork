@@ -27,8 +27,13 @@ async def mcp_lifespan(_server: FastMCP) -> AsyncGenerator[dict]:
 
     openai_client = get_openai_client(settings)
     async with get_async_qdrant_client(settings) as qdrant_client:
+        query_handler = QdrantQueryHandler(qdrant_client, openai_client, settings)
+        try:
+            await query_handler.init()
+        except Exception:
+            logger.exception("Failed to initialize QdrantQueryHandler")
         yield {
-            "qdrant_query_handler": QdrantQueryHandler(qdrant_client, openai_client, settings),
+            "qdrant_query_handler": query_handler,
             "openai_client": openai_client,
         }
 
@@ -40,6 +45,7 @@ mcp_server = FastMCP(
     # Configure transport security with allowed hosts from settings
     transport_security=TransportSecuritySettings(
         allowed_hosts=[h.strip() for h in settings.MCP_ALLOWED_HOSTS.split(",") if h.strip()],
+        port=settings.MCP_PORT,
     ),
 )
 

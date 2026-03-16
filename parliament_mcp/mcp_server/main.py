@@ -113,7 +113,7 @@ def main(reload=True):
         port=settings.MCP_PORT,
         reload=reload,
         factory=True,
-        timeout_graceful_shutdown=0,
+        timeout_graceful_shutdown=30,
     )
 
 

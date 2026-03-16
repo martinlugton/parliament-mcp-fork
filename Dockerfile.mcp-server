@@ -8,6 +8,8 @@ ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
 ENV COLUMNS=200
 ENV APP_VERSION=$VERSION
+ENV UV_PROJECT_ENVIRONMENT=/usr/local
+ENV UV_SYSTEM_PYTHON=1
 
 # Install system dependencies and uv
 RUN apt-get update && apt-get install -y \
@@ -25,10 +27,11 @@ COPY pyproject.toml uv.lock ./
 COPY parliament_mcp parliament_mcp
 
 # Install dependencies
-RUN uv sync --frozen
+RUN uv sync --frozen --no-install-project
 
 # Copy the rest of the application code
 COPY . .
+RUN uv pip install -e .
 
 # Command to run the MCP server
-CMD ["uv", "run", "parliament-mcp", "serve", "--no-reload"]
+CMD ["parliament-mcp", "serve", "--no-reload"]

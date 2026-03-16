@@ -100,8 +100,14 @@ class QdrantQueryHandler:
     ):
         self.qdrant_client = qdrant_client
         self.openai_client = openai_client
-        self.sparse_text_embedding = SparseTextEmbedding(model_name=settings.SPARSE_TEXT_EMBEDDING_MODEL)
         self.settings = settings
+        self.sparse_text_embedding = None
+
+    async def init(self):
+        """Initialize the sparse text embedding model asynchronously."""
+        if self.sparse_text_embedding is None:
+            # This can be slow as it might download the model
+            self.sparse_text_embedding = SparseTextEmbedding(model_name=self.settings.SPARSE_TEXT_EMBEDDING_MODEL)
 
     async def embed_query_dense(self, query: str) -> list[float]:
         """Embed a query using the dense text embedding model."""
