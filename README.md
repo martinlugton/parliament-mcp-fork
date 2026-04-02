@@ -61,8 +61,9 @@ To keep the data up to date, run the sync commands regularly.
 **Option 1: Robust Sync (Recommended)**
 Uses the stateful loader to identify the last date and harvest missing items.
 ```bash
-docker compose exec mcp-server make sync_robust
+docker compose exec mcp-server bash -c "uv run parliament-mcp --log-level INFO init-qdrant && uv run python robust_loader.py sync --process"
 ```
+> **Note:** Do not use `make sync_robust` inside the container — the Makefile reads `.env` and overwrites `QDRANT_URL` with `localhost:6333`, breaking the connection to Qdrant.
 
 **Option 2: Quick Sync**
 Fast, stateless sync for the last few days.
@@ -74,11 +75,13 @@ docker compose exec mcp-server make sync
 You can monitor progress or manage the state of the robust loader:
 
 ```bash
-# Check current progress and latest dates in the local queue
-docker compose exec mcp-server uv run python robust_loader.py stats
+# Check the latest dates and counts per source in the local queue (most reliable)
 docker compose exec mcp-server uv run python get_db_dates.py
 
-# Check the latest dates successfully stored in Qdrant
+# Check current queue progress (PENDING / PROCESSING / COMPLETED counts)
+docker compose exec mcp-server uv run python robust_loader.py stats
+
+# Check the latest dates stored in Qdrant (uses order_by for accuracy)
 docker compose exec mcp-server uv run python get_latest_date.py
 
 # Check API embedding costs
