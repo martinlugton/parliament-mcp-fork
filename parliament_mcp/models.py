@@ -76,7 +76,8 @@ class Contribution(QdrantDocument):
     @computed_field
     @property
     def debate_url(self) -> str:
-        return f"https://hansard.parliament.uk/{self.House}/{self.SittingDate:%Y-%m-%d}/debates/{self.DebateSectionExtId}/link"
+        slug = (self.DebateSection or "").strip().replace(" ", "")
+        return f"https://hansard.parliament.uk/{self.House}/{self.SittingDate:%Y-%m-%d}/debates/{self.DebateSectionExtId}/{slug}"
 
     @computed_field
     @property
