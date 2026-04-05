@@ -322,6 +322,7 @@ class QdrantQueryHandler:
                     "contribution_id": payload.get("ContributionExtId"),
                     "contribution_url": payload.get("contribution_url", ""),
                     "order_in_debate": payload.get("OrderInDebateSection"),
+                    "chunk_id": payload.get("chunk_id", ""),
                     "debate_parents": payload.get("debate_parents", []),
                 }
             )
