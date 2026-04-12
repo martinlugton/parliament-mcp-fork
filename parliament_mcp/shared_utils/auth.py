@@ -62,7 +62,7 @@ def parse_auth_token(auth_header) -> tuple[str, list[str]]:
         msg = "No auth token provided to parse."
         raise ValueError(msg)
 
-    verify_jwt_source = not os.environ.get("DISABLE_AUTH_SIGNATURE_VERIFICATION")
+    verify_jwt_source = os.environ.get("DISABLE_AUTH_SIGNATURE_VERIFICATION", "").lower() != "true"
     token_content = __get_decoded_jwt(auth_header, verify_jwt_source)
 
     email = token_content.get("email")
