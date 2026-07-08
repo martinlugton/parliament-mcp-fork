@@ -736,7 +736,10 @@ async def sync_command(args):
     
     if args.process:
         processor = Processor(qm)
-        await processor.process_queue_loop(loop=True)
+        # loop=False: drain the queue harvested above, then return. loop=True
+        # would wait forever for new items — wrong for a one-shot cron sync
+        # (it hung the daily job until systemd killed it at the 6h timeout).
+        await processor.process_queue_loop(loop=False)
 
 def main():
     parser = argparse.ArgumentParser(description="Robust Data Loader for Parliament MCP")
